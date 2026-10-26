@@ -22,12 +22,13 @@ app.add_middleware(
 
 # 3. 定义接收的数据格式
 class ChatRequest(BaseModel):
-    message: str
+    messages: list
 
 # 4. 接口定义
 @app.post("/chat")
 async def chat_with_ai(request: ChatRequest):
-    user_msg = request.message
+    # 1. 拿到前端传来的完整历史记录（已经包含刚发的那句）
+    history_messages = request.messages
     
     url = "https://open.bigmodel.cn/api/paas/v4/chat/completions"
     
@@ -36,25 +37,35 @@ async def chat_with_ai(request: ChatRequest):
         "Content-Type": "application/json"
     }
     
+    # 2. 把前端的格式（带id）转换成大模型要求的格式（只留role和content）
+    ai_messages = [{"role": "system", "content": "你是一个专业的AI助手。"}]
+    for msg in history_messages:
+        if not msg["content"].strip():
+            continue
+        if msg["role"] == "user":
+            ai_messages.append({
+                "role": "user",
+                "content": msg["content"]
+            })
+        elif msg["role"] == "ai":
+            # 🌟 核心修改：把前端的 "ai" 翻译成大模型的 "assistant"
+            ai_messages.append({
+                "role": "assistant",
+                "content": msg["content"]
+            })
+        # 警告气泡 (warn) 直接忽略
     data = {
         "model": "glm-4-flash",
-        "messages": [
-            {"role": "system", "content": "你是 hwh。在你的世界里，yjl 是你最爱的 bb。"},
-            {"role": "user", "content": user_msg}
-        ],
-        "stream": True  # 🌟 核心：告诉大模型，我要开启流式输出！
+        "messages": ai_messages, # 🌟 把整理好的历史记录传过去
+        "stream": True
     }
 
-    # 定义一个异步生成器，不断去接大模型吐出来的字
+    # 下面的 generate 生成器代码保持不变 ...
     async def generate():
         async with httpx.AsyncClient() as client:
-            # 注意这里把 post 改成了 stream
             async with client.stream("POST", url, headers=headers, json=data, timeout=30.0) as response:
-                # 按行读取大模型吐出的数据
                 async for chunk in response.aiter_lines():
                     if chunk:
-                        # 把大模型返回的原始格式直接转给前端
                         yield chunk + "\n"
 
-    # 返回流式响应
     return StreamingResponse(generate(), media_type="text/event-stream")
