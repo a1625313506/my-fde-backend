@@ -6,7 +6,7 @@ import httpx
 import os
 import json
 from dotenv import load_dotenv
-from sqlalchemy import create_engine, Column, Integer, String, Text
+from sqlalchemy import create_engine, Column, Integer, String, Text,ForeignKey
 from sqlalchemy.orm import declarative_base, sessionmaker
 
 # ================= 1. 基础配置与数据库 =================
@@ -18,6 +18,10 @@ SQLALCHEMY_DATABASE_URL = "sqlite:///./chat.db"
 engine = create_engine(SQLALCHEMY_DATABASE_URL, connect_args={"check_same_thread": False})
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
+class ConversationModel(Base):
+    __tablename__ = "conversations"
+    id = Column(Integer, primary_key=True, index=True)
+    title = Column(String,default="新对话")
 
 # 定义数据表
 class MessageModel(Base):
@@ -25,7 +29,7 @@ class MessageModel(Base):
     id = Column(Integer, primary_key=True, index=True)
     role = Column(String)
     content = Column(Text)
-
+    conversation_id = Column(Integer, ForeignKey("conversations.id"),nullable=True)
 # 建表
 Base.metadata.create_all(bind=engine)
 
@@ -42,17 +46,18 @@ app.add_middleware(
 # ================= 2. 定义数据格式 =================
 class ChatRequest(BaseModel):
     messages: list
+    conversation_id: int
 
 # ================= 3. 核心业务逻辑 =================
 @app.post("/chat")
 async def chat_with_ai(request: ChatRequest):
     history_messages = request.messages
-    
+    conv_id=request.conversation_id
     # 提取最后一条用户消息存入数据库
     user_msg = history_messages[-1]["content"]
     db = SessionLocal()
     try:
-        new_msg = MessageModel(role="user", content=user_msg)
+        new_msg = MessageModel(role="user", content=user_msg,conversation_id=conv_id)
         db.add(new_msg)
         db.commit()
     finally:
@@ -105,20 +110,30 @@ async def chat_with_ai(request: ChatRequest):
         if full_ai_reply:
             db = SessionLocal()
             try:
-                ai_msg = MessageModel(role="ai", content=full_ai_reply)
+                ai_msg = MessageModel(role="ai", content=full_ai_reply,conversation_id=conv_id)
                 db.add(ai_msg)
                 db.commit()
             finally:
                 db.close()
 
     return StreamingResponse(generate(), media_type="text/event-stream")
-
+@app.post("/conversation/new")
+async def creat_conversation():
+    db=SessionLocal()
+    try:
+        new_conv=ConversationModel(title="新对话")
+        db.add(new_conv)
+        db.commit()
+        db.refresh(new_conv)
+        return{"conversation_id":new_conv.id}
+    finally:
+        db.close()
 # ================= 4. 获取历史记录 =================
-@app.get("/history")
-async def get_history():
+@app.get("/history/{conversation_id}")
+async def get_history(conversation_id: int):
     db = SessionLocal()
     try:
-        messages = db.query(MessageModel).order_by(MessageModel.id).all()
+        messages = db.query(MessageModel).filter(MessageModel.conversation_id == conversation_id).order_by(MessageModel.id).all()
         result = [{"id": m.id, "role": m.role, "content": m.content} for m in messages]
         return {"history": result}
     finally:
