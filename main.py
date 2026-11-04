@@ -74,16 +74,54 @@ class ChatRequest(BaseModel):
 @app.post("/chat")
 async def chat_with_ai(request: ChatRequest):
     history_messages = request.messages
-    conv_id=request.conversation_id
-    # 提取最后一条用户消息存入数据库
+    conv_id = request.conversation_id
+    
     user_msg = history_messages[-1]["content"]
+    
+    # 1. 存用户消息（保持原样）
     db = SessionLocal()
     try:
-        new_msg = MessageModel(role="user", content=user_msg,conversation_id=conv_id)
+        new_msg = MessageModel(role="user", content=user_msg, conversation_id=conv_id)
         db.add(new_msg)
         db.commit()
     finally:
         db.close()
+
+    # ==========================================
+    # 🌟 核心新增：去向量库偷看小抄！
+    # ==========================================
+    try:
+        # 把用户的问题变成向量
+        query_embedding = await get_embeddings([user_msg])
+        # 去数据库里找最相似的 2 个文本块
+        results = collection.query(query_embeddings=query_embedding, n_results=2)
+        
+        # 把搜出来的结果拼成一段长文本
+        context_text = "\n".join(results["documents"][0]) if results["documents"][0] else "无相关参考资料"
+    except Exception as e:
+        context_text = "检索知识库失败。"
+        print(f"检索报错：{e}")
+
+    # ==========================================
+    # 🌟 核心改造：拼装带小抄的 System Prompt
+    # ==========================================
+    # 这里我们给 AI 下达极其严格的指令
+    system_prompt = f"""你是一个专业的企业内部知识库助手。
+请严格根据我提供的【参考资料】来回答用户的问题。
+如果参考资料中找不到答案，请直接回答“抱歉，内部知识库中没有相关记录”，绝对不允许自己编造答案！
+
+【参考资料】：
+{context_text}
+"""
+
+    ai_messages = [{"role": "system", "content": system_prompt}]
+    
+    # 把历史记录塞进去（注意：历史记录里只放用户的纯文字，不需要放历史的小抄，不然 Token 会爆炸）
+    for msg in history_messages:
+        if msg["role"] == "user":
+            ai_messages.append({"role": "user", "content": msg["content"]})
+        elif msg["role"] == "ai":
+            ai_messages.append({"role": "assistant", "content": msg["content"]})
 
     url = "https://open.bigmodel.cn/api/paas/v4/chat/completions"
     headers = {
@@ -91,8 +129,13 @@ async def chat_with_ai(request: ChatRequest):
         "Content-Type": "application/json"
     }
     
-    # 转换角色格式
-    ai_messages = [{"role": "system", "content": "你是一个专业的AI助手。"}]
+    data = {
+        "model": "glm-4-flash",
+        "messages": ai_messages, # 这里的 messages 已经悄悄带上了小抄
+        "stream": True
+    }
+    
+    # 下面的 generate() 流式代码保持完全不变...
     for msg in history_messages:
         if not msg["content"].strip():
             continue
