@@ -3,3 +3,6 @@ uvicorn
 httpx
 python-dotenv
 sqlalchemy
+python-multipart==0.0.32
+pypdf
+chromadb

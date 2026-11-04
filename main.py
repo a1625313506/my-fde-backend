@@ -8,6 +8,10 @@ import json
 from dotenv import load_dotenv
 from sqlalchemy import create_engine, Column, Integer, String, Text,ForeignKey
 from sqlalchemy.orm import declarative_base, sessionmaker
+from fastapi import UploadFile, File
+from pypdf import PdfReader
+import io
+import chromadb
 
 # ================= 1. 基础配置与数据库 =================
 load_dotenv()
@@ -33,8 +37,26 @@ class MessageModel(Base):
 # 建表
 Base.metadata.create_all(bind=engine)
 
-app = FastAPI()
-
+app = FastAPI(root_path="/api")
+# 创建一个本地文件夹存向量数据
+chroma_client = chromadb.PersistentClient(path="./chroma_db")
+# 创建一个集合（类似数据库里的表）
+collection = chroma_client.get_or_create_collection(name="pdf_knowledge")
+async def get_embeddings(texts: list[str]):
+    url = "https://open.bigmodel.cn/api/paas/v4/embeddings"
+    headers = {
+        "Authorization": f"Bearer {API_KEY}",
+        "Content-Type": "application/json"
+    }
+    data = {
+        "model": "embedding-2", # 智谱的向量模型
+        "input": texts
+    }
+    async with httpx.AsyncClient() as client:
+        response = await client.post(url, headers=headers, json=data, timeout=30.0)
+        result = response.json()
+        # 返回一个包含所有向量的列表
+        return [item["embedding"] for item in result["data"]]
 # 跨域配置
 app.add_middleware(
     CORSMiddleware,
@@ -138,3 +160,58 @@ async def get_history(conversation_id: int):
         return {"history": result}
     finally:
         db.close()
+@app.get("/search")
+async def search_knowledge(query: str):
+    # 1. 把用户的提问也变成向量
+    query_embedding = await get_embeddings([query])
+    
+    # 2. 去向量数据库里找最相似的 2 个文本块
+    results = collection.query(
+        query_embeddings=query_embedding,
+        n_results=2
+    )
+    
+    return {"matched_text": results["documents"][0]}
+@app.post("/upload_pdf")
+async def upload_pdf(file: UploadFile = File(...)):
+    try:
+        # 1. 读取前端传来的文件内容
+        content = await file.read()
+        
+        # 2. 用 PdfReader 读取这个 PDF
+        pdf_reader = PdfReader(io.BytesIO(content))
+        
+        # 3. 提取所有页面的文字
+        full_text = ""
+        for page in pdf_reader.pages:
+            text = page.extract_text()
+            if text:
+                full_text += text + "\n"
+        
+        # 4. 最核心的一步：文本切分（Chunking）
+        # 大模型一次吃不下太多字，我们需要把长文切成 500 字一段。
+        chunk_size = 500
+        chunks = [full_text[i:i+chunk_size] for i in range(0, len(full_text), chunk_size)]
+        # ... 你的切块代码 chunks = [...] ...
+
+        # 🌟 新增：把这堆 chunks 发给大模型，变成向量！
+        embeddings = await get_embeddings(chunks)
+
+        # 🌟 新增：存入 ChromaDB
+        # 我们需要给每一块起一个唯一的 ID
+        ids = [f"{file.filename}_{i}" for i in range(len(chunks))]
+        
+        collection.add(
+            documents=chunks,        # 原文
+            embeddings=embeddings,   # 向量数字
+            ids=ids                  # 唯一身份证
+        )
+
+        return {
+            "message": "文件解析并存入向量库成功！",
+            "filename": file.filename,
+            "chunks_count": len(chunks)
+        }
+        
+    except Exception as e:
+        return {"error": str(e)}
