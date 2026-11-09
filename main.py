@@ -135,20 +135,7 @@ async def chat_with_ai(request: ChatRequest):
         "stream": True
     }
     
-    # 下面的 generate() 流式代码保持完全不变...
-    for msg in history_messages:
-        if not msg["content"].strip():
-            continue
-        if msg["role"] == "user":
-            ai_messages.append({"role": "user", "content": msg["content"]})
-        elif msg["role"] == "ai":
-            ai_messages.append({"role": "assistant", "content": msg["content"]})
-
-    data = {
-        "model": "glm-4-flash",
-        "messages": ai_messages,
-        "stream": True
-    }
+    # 下面的 generate() 流式代码保持完全不变...=
 
     # 流式生成器
     async def generate():
