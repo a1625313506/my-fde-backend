@@ -202,6 +202,18 @@ async def search_knowledge(query: str):
     )
     
     return {"matched_text": results["documents"][0]}
+@app.delete("/conversation/{conversation_id}")
+async def delete_conversation(conversation_id: int):
+    db = SessionLocal()
+    try:
+        # 1. 先删掉这个房间里的所有消息（子表）
+        db.query(MessageModel).filter(MessageModel.conversation_id == conversation_id).delete()
+        # 2. 再删掉这个房间本身（父表）
+        db.query(ConversationModel).filter(ConversationModel.id == conversation_id).delete()
+        db.commit()
+        return {"message": "会话已彻底删除"}
+    finally:
+        db.close()
 @app.post("/upload_pdf")
 async def upload_pdf(file: UploadFile = File(...)):
     try:
